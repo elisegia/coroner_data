@@ -1,0 +1,876 @@
+---
+title: "Topic Modeling of Child Deaths"
+author: "Gia Elise Barboza"
+date: "December 20, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Text Mining Coroner Autopsy Reports
+
+Child fatality is a significant public health problem, and understanding its causes is critical for successful prevention efforts. Briefly, data limitations make it difficult to understand the risk factors for child death. The goal of this analysis is to begin to make sense of, or structure, textual data, which is messy (unstructured). This type of analysis allows us to utilize vast amounts of information that can be mined from the web.
+
+This is a tutorial on how to perform Topic Modeling on narrative text information. The data is based on the unstructured corpus of the description surrounding death of children under 6 years old who died in Los Angeles County between 2000 - 2017.
+
+```{r libs, include = FALSE }
+library(tm)
+
+library(RColorBrewer)
+library(ggplot2)
+library(ggthemes)
+library(cowplot)
+
+library(SnowballC)
+library(wordcloud)
+library(wordcloud2)
+library(gplots)
+
+library(biclust)
+library(cluster)
+library(igraph)
+library(fpc)
+library(kohonen)
+
+library(LDAvis)
+library(servr)
+library(ldatuning)
+library(topicmodels)
+
+library(dplyr)
+library(stringi) 
+library(Rmpfr)
+library(lubridate)
+
+library(grid)
+library(gridExtra)
+
+library(qdap)
+library(rvest)
+
+library(plotrix)
+
+library(RWeka)
+library(reshape2)
+library(quanteda)
+
+
+library(irlba)
+library(e1071)
+library(caret)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+library(igraph)
+
+library(tidytext) 
+library(tidyverse) 
+library(scales) 
+library(proxy)
+```
+
+## Read data set
+
+This will be a description of what the following code is doing:
+
+```{r readdat, echo=TRUE}
+source("F:/New Papers/text mining/child maltreatment/R code/multiplot.R")
+source("F:/GSU/swords.R")
+
+deathdat <- read.csv("E:/Summer Research/Data/Spatial Data/California/Homicide/FINAL CHILD DEATH DATA.csv", stringsAsFactors = FALSE)
+
+deathdat[[9]] <- gsub( "GSW" , "gun shot wound" , deathdat[[9]])
+deathdat[[9]] <- gsub( "Mgun" , "multiple gun shot wounds" , deathdat[[9]])
+deathdat[[9]] <- gsub( "shoot" , "shot" , deathdat[[9]])
+
+
+deathdat <- deathdat[c(1,3, 9,10)]
+colnames(deathdat)[1] <- "doc_id"
+colnames(deathdat)[2] <- "age"
+colnames(deathdat)[3] <- "text"
+colnames(deathdat)[4] <- "time_of_death"
+          
+
+docs <- VCorpus(DataframeSource(deathdat))
+
+inspect(docs[1])
+
+```
+
+```{r process}
+     
+docs <- tm_map(docs,removePunctuation)   
+docs <- tm_map(docs, removeNumbers)   
+docs <- tm_map(docs,content_transformer(tolower))
+docs <- tm_map(docs, removeWords, stopwords("english"))   
+docs <- tm_map(docs, removeWords, s_words)
+ 
+docs <- tm_map(docs, stripWhitespace)
+docs<-tm_map(docs, stemDocument)
+docs <- tm_map(docs, PlainTextDocument)
+
+docs[[18]]$content
+```
+
+```{r createDTM}
+tdm <- TermDocumentMatrix(docs, control=list(bounds = list(global = c(5,Inf))))
+dim(tdm) # after Terms that appear in <5 documents are discarded
+
+dtm <- DocumentTermMatrix(docs, control=list(bounds = list(global = c(5,Inf))))
+dim(dtm) # after Terms that appear in <5 documents are discarded
+
+rownames(dtm) <- deathdat$doc_id
+
+freq <- colSums(as.matrix(dtm))   
+length(freq)   
+ord <- order(freq)   
+
+term_tfidf <- tapply(dtm$v/slam::row_sums(dtm)[dtm$i], dtm$j, mean) *
+  log2(tm::nDocs(dtm)/slam::col_sums(dtm > 0))
+summary(term_tfidf)
+
+m_tdm <- as.matrix(tdm)
+
+
+m_dtm <- as.matrix(dtm)   
+dim(m_dtm)
+
+
+v <- sort(rowSums(m_tdm),decreasing=TRUE)
+d <- data.frame(word = names(v),freq=v)
+
+# Find the sum of words in each Document and remove all docs w/out words
+# or else an error will result below
+rowTotals <- apply(dtm , 1, sum) 
+dtm   <- dtm[rowTotals> 0, ]     
+
+#dtm <- dtm[,term_tfidf >= 0.155]
+summary(slam::col_sums(dtm))
+freqs <- slam::col_sums(dtm)
+
+# Save this for Shiny app later on 
+write.csv(m_dtm, file=paste("F:/Examples/ITMViz-master/ITMViz-master/data/jedit-5.1.0", "DocumentTermMatrix.csv", sep="/")) 
+
+dtm$dimnames$Terms
+```
+```{r}
+dat <-data.frame(text=unlist(sapply(docs, `[`, "content")), stringsAsFactors=F)
+dat <- cbind(deathdat[, 1:2,  4], dat)
+
+wordMat <- wfm(dat$text, dat$age )
+ws <- word_stats(dat$text, dat$age, rm.incomplete = T)
+plot(ws, label = T, lab.digits = 2)
+
+posbydf <- pos_by(dat$text, grouping.var = dat$age)
+names(posbydf)
+
+plot(posbydf, values = T, digits = 2)
+automated_readability_index(dat$text, dat$age)
+diversity(dat$text, dat$age)
+
+pol <- polarity(dat$text, dat$age)
+plot(pol)
+dispersion_plot(dat$text, c("trauma", "arson", "bleed", "gestation"), dat$age)
+dat$agegrp <- NA
+dat$agegrp <- ifelse(dat$age < 1, "0", ">=1")
+gradient_cloud(dat$text, dat$agegrp, min.freq = 50, stem = T, max.word.size = 2)
+
+############################################################
+```
+
+```{r}
+p1 <- ggplot(subset(d[1:50,], freq>15), aes(x = reorder(word, -freq), y = freq)) +
+  geom_bar(stat = "identity") + 
+  theme(axis.text.x=element_text(angle=90, hjust=1)) + ggtitle("")
+
+dtm_tfidf <- DocumentTermMatrix(docs, control = list(weighting = weightTfIdf))
+dtm_tfidf = removeSparseTerms(dtm_tfidf, 0.95)
+dtm_tfidf
+freq = data.frame(sort(colSums(as.matrix(dtm_tfidf)), decreasing=TRUE))
+
+freq$words <- rownames(freq)
+colnames(freq)[1] <- "termFreq"
+
+p2 <- ggplot(freq[1:50, ], aes(x = reorder(words, -termFreq), y = termFreq)) +
+  geom_bar(stat = "identity") + 
+  theme(axis.text.x=element_text(angle=90, hjust=1)) + ggtitle("")
+
+death_bigram <- tokens(dat$text) %>%
+  tokens_remove("\\p{P}", valuetype = "regex", padding = TRUE) %>%
+  tokens_remove(stopwords("english"), padding  = TRUE) %>%
+  tokens_ngrams(n = 2) %>%
+  dfm()
+topfeatures(death_bigram)
+
+bi <- data.frame(topfeatures(death_bigram))
+
+bi$words <- rownames(bi)
+colnames(bi)[1] <- "Freq"
+
+p3 <- ggplot(bi, aes(x = reorder(words, -Freq), y = Freq)) +
+  geom_bar(stat = "identity") + coord_flip() +
+  theme(axis.text.x=element_text(angle=90, hjust=1)) + ggtitle("")
+
+
+##Create tri-grams
+death_trigram <- tokens(dat$text) %>%
+  tokens_remove("\\p{P}", valuetype = "regex", padding = TRUE) %>%
+  tokens_remove(stopwords("english"), padding  = TRUE) %>%
+  tokens_ngrams(n = 3) %>%
+  dfm()
+topfeatures(death_trigram)
+tri <- data.frame(topfeatures(death_trigram))
+
+tri$words <- rownames(tri)
+colnames(tri)[1] <- "Freq"
+
+p4 <- ggplot(tri, aes(x = reorder(words, -Freq), y = Freq)) +
+  geom_bar(stat = "identity") + coord_flip()+
+  theme(axis.text.x=element_text(angle=90, hjust=1)) + ggtitle("")
+
+
+plot_grid(p1,p2, p3,p4, labels=c('Most Recurring Words', 'Most Important Words (TF-IDF)', 'Bi-Grams', 'Tri-Grams'))
+```
+
+```{r}
+summary(slam::col_sums(dtm))
+freqs <- slam::col_sums(dtm)
+
+words <- colnames(dtm)
+wordlist <- data.frame(words, freqs)
+wordIndexes <- order(wordlist[, "freqs"], decreasing = TRUE)
+wordlist <- wordlist[wordIndexes, ]
+
+head(wordlist, 55)
+```
+
+```{r}
+tdms <- removeSparseTerms(tdm, 0.99) 
+# Create, save and plot associations
+# This will be interactive in Shiny App later
+associations <- findAssocs(tdm, "methamphetamin", 0.15)
+associations_df1 <- list_vect2df(associations)[, 2:3]
+
+p1<-ggplot(associations_df1, aes(y = associations_df1[, 1])) + 
+  geom_point(aes(x = associations_df1[, 2]), 
+             data = associations_df1, size = 3) + 
+  ggtitle("") + 
+  theme_gdocs()
+
+
+
+associations <- findAssocs(tdm, "foster", 0.15)
+associations_df2 <- list_vect2df(associations)[, 2:3]
+
+p2<-ggplot(associations_df2, aes(y = associations_df2[, 1])) + 
+  geom_point(aes(x = associations_df2[, 2]), 
+             data = associations_df2, size = 3) + 
+  ggtitle("") + 
+  theme_gdocs()
+
+
+associations <- findAssocs(tdm, "shot", 0.2)
+associations_df3 <- list_vect2df(associations)[, 2:3]
+
+p3<- ggplot(associations_df3, aes(y = associations_df3[, 1])) + 
+  geom_point(aes(x = associations_df3[, 2]), 
+             data = associations_df3, size = 3) + 
+  ggtitle("") + 
+  theme_gdocs()
+
+
+associations <- findAssocs(tdm, "suicid", 0.2)
+associations_df4 <- list_vect2df(associations)[, 2:3]
+
+p4<- ggplot(associations_df4, aes(y = associations_df4[, 1])) + 
+  geom_point(aes(x = associations_df4[, 2]), 
+             data = associations_df4, size = 3) + 
+  ggtitle("") + 
+  theme_gdocs()
+
+
+associations <- findAssocs(tdm, "neglect", 0.15)
+associations_df5 <- list_vect2df(associations)[, 2:3]
+
+p5<- ggplot(associations_df5, aes(y = associations_df5[, 1])) + 
+  geom_point(aes(x = associations_df5[, 2]), 
+             data = associations_df5, size = 3) + 
+  ggtitle("") + 
+  theme_gdocs()
+
+
+associations <- findAssocs(tdm, "drug", 0.18)
+associations_df6 <- list_vect2df(associations)[, 2:3]
+
+p6<- ggplot(associations_df6, aes(y = associations_df6[, 1])) + 
+  geom_point(aes(x = associations_df6[, 2]), 
+             data = associations_df6, size = 3) + 
+  ggtitle("") + 
+  theme_gdocs()
+
+plot_grid(p1,p2,p3,p4,p5,p6, labels=c('Meth', 'Foster', 'Shot', 'Suicide', 'Neglect', 'Drug'))
+
+```
+
+```{r}
+terms_to_observe <- c("father", "infant", "death", "head", 
+                      "injuri", "unrespons",  
+                      "left", "medic", "bruis", 
+                      "deced", "home", "shot", "boyfriend",
+                      "multipl", "care")
+DTM_reduced <- as.matrix(dtm[, terms_to_observe])
+heatmap(t(DTM_reduced), Colv=NA, col = rev(heat.colors(256)), keep.dendro= FALSE, margins = c(2, 15))
+
+```
+
+```{r}
+# Plot multiple frequencies not one at a time ala above
+counts_per_age<- aggregate(DTM_reduced, by = list(age = deathdat$age), sum)
+ages <- counts_per_age$age
+frequencies <- counts_per_age[, terms_to_observe]
+
+
+matplot(ages, frequencies, type = "l", xlab = "Age of Child", ylab = "Frequency", main = "Frequency Distribution of Selected Words by Age at Death")
+
+l <- length(terms_to_observe)
+legend('topright', legend = terms_to_observe, col=1:l, text.col = 1:l, lty = 1:l)  
+
+```
+
+```{r}
+terms_to_observe <- c("shot",  "bruis", "suicid")
+DTM_reduced <- as.matrix(dtm[, terms_to_observe])
+
+deathdat$time_of_death <- as.Date(deathdat$time_of_death, format = "%m/%d/%Y")
+deathdat$yearofdeath <- year(deathdat$time_of_death)
+counts_per_year <- aggregate(DTM_reduced, by = list(deathdate = deathdat$yearofdeath), sum)
+decades <- counts_per_year$deathdate
+frequencies <- counts_per_year[, terms_to_observe]
+
+# plot multiple frequencies
+matplot(decades, frequencies, type = "l", xlab = "Year of Death", ylab = "Frequency", main = "Frequency Distribution of Selected Words by Year")
+
+# add legend to the plot
+l <- length(terms_to_observe)
+legend('topleft', legend = terms_to_observe, col=1:l, text.col = 1:l, lty = 1:l)  
+
+```
+
+```{r}
+terms_to_observe <- c( "suicid")
+
+DTM_reduced <- as.matrix(dtm[, terms_to_observe])
+
+deathdat$time_of_death <- as.Date(deathdat$time_of_death, format = "%m/%d/%Y")
+deathdat$yearofdeath <- year(deathdat$time_of_death)
+counts_per_year <- aggregate(DTM_reduced, by = list(deathdate = deathdat$yearofdeath), sum)
+decades <- counts_per_year$deathdate
+frequencies <- counts_per_year[, terms_to_observe]
+
+# plot multiple frequencies
+matplot(decades, frequencies, type = "l", xlab = "Year of Death", ylab = "Frequency", main = paste("Freq of term", terms_to_observe, sep = ": "))
+```
+
+```{r}
+tdms <- removeSparseTerms(dtm, 0.95) 
+tf <- as.matrix(tdms)
+idf <- log( ncol(tf) / ( 1 + rowSums(tf != 0) ) ) %>% diag()
+xprod <- crossprod(tf, idf)
+d1<- dist( xprod, method = "cosine" )
+cluster1 <- hclust(d1, method = "ward.D")
+plot.new()
+plot(cluster1, xlab = "Cosine Similarity")
+rect.hclust(cluster1, 14)
+
+groups1 <- cutree(cluster1, 14)
+
+dtms <- removeSparseTerms(dtm, 0.99)   
+freq <- colSums(as.matrix(dtm))  
+dark2 <- brewer.pal(6, "Dark2")   
+dtm2 <- as.matrix(dtms)
+frequency <- colSums(dtm2)
+frequency <- sort(frequency, decreasing=TRUE)
+words <- names(frequency)
+wordcloud2(data = data.frame(words, frequency), size = 1, ellipticity = .8,  color="random-light", backgroundColor="black")
+```
+
+```{r}
+rowTotals <- apply(dtm , 1, sum) #Find the sum of words in each Document
+dtm   <- dtm[rowTotals> 0, ]           #remove all docs without words
+```
+
+```{r}
+################################################################################################
+set.seed(8745)
+
+harmonicMean <- function(logLikelihoods, precision = 2000L) {
+  llMed <- median(logLikelihoods)
+  as.double(llMed - log(mean(exp(-mpfr(logLikelihoods, prec = precision) + llMed))))
+}
+
+seqk <- seq(2, 50, 1)
+burnin <- 10
+iter <- 10000
+keep <- 50
+system.time(fitted_many <- lapply(seqk, function(k) topicmodels::LDA(dtm, k = k, method = "Gibbs",control = list(burnin = burnin, iter = iter, keep = keep) )))
+logLiks_many <- lapply(fitted_many, function(L)  L@logLiks[-c(1:(burnin/keep))])
+hm_many <- sapply(logLiks_many, function(h) harmonicMean(h))
+
+ldaplot <- ggplot(data.frame(seqk, hm_many), aes(x=seqk, y=hm_many)) + geom_path(lwd=1.5) +
+  theme(text = element_text(family= NULL),
+        axis.title.y=element_text(vjust=1, size=16),
+        axis.title.x=element_text(vjust=-.5, size=16),
+        axis.text=element_text(size=16),
+        plot.title=element_text(size=20)) +
+  xlab('Number of Topics') +
+  ylab("Estimated Log p(w|T)") +
+  ggtitle("Latent Dirichlet Allocation Analysis of Description Surrounding Death")
+ldaplot
+seqk[which.max(hm_many)] 
+```
+
+```{r}
+
+system.time({
+  tunes <- FindTopicsNumber(
+    dtm = dtm,
+    topics = c(2:50),
+    metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+    method = "Gibbs",
+    control = list(seed = 12345),
+    mc.cores = 4L,
+    verbose = TRUE
+  )
+})
+
+
+FindTopicsNumber_plot(tunes)
+
+folds <- 5
+splitfolds <- sample(1:folds, 23, replace = TRUE)
+candidate_k <- c(2:50) # candidates for how many topics
+
+
+# we parallelize by the different number of topics.  A processor is allocated a value
+# of k, and does the cross-validation serially.  This is because it is assumed there
+# are more candidate values of k than there are cross-validation folds, hence it
+# will be more efficient to parallelise
+library(doParallel)
+cluster <- makeCluster(detectCores(logical = TRUE) - 1) # leave one CPU spare...
+registerDoParallel(cluster)
+
+clusterEvalQ(cluster, {
+  library(topicmodels)
+})
+system.time({
+  results <- foreach(j = 1:length(candidate_k), .combine = rbind) %dopar%{
+    k <- candidate_k[j]
+    results_1k <- matrix(0, nrow = folds, ncol = 2)
+    colnames(results_1k) <- c("k", "perplexity")
+    for(i in 1:folds){
+      train_set <- dtm[splitfolds != i , ]
+      valid_set <- dtm[splitfolds == i, ]
+      
+      fitted <- LDA(train_set, k = k, method = "Gibbs",
+                    control = list(burnin = burnin, iter = iter, keep = keep) )
+      results_1k[i,] <- c(k, perplexity(fitted, newdata = valid_set))
+    }
+    return(results_1k)
+  }
+})
+
+results_df <- as.data.frame(results)
+
+ggplot(results_df, aes(x = k, y = perplexity)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  ggtitle("5-fold cross-validation of topic modeling with the Coroner's dataset",
+          "(ie five different models fit for each candidate number of topics)") +
+  labs(x = "Candidate number of topics", y = "Perplexity when fitting the trained model to the hold-out set")
+######################################################################################
+```
+
+```{r}
+#LDA model with 20 topics selected
+K <- 20
+seqk[which.max(hm_many)] <- K
+
+lda_15 = LDA(dtm, k = K, method = 'Gibbs', 
+            control = list(nstart = 5, seed = list(1505,99,36,56,88), best = TRUE, 
+                           thin = 500, burnin = 4000, iter = 2000))
+
+tmResult <- posterior(lda_15)
+tmResult1 <- data.frame(t(tmResult$terms))
+
+attributes(tmResult)
+nTerms(dtm)
+
+# topics are probability distribtions over the entire vocabulary
+beta <- tmResult$terms   # get beta from results
+dim(beta)                
+rowSums(beta)      
+nDocs(dtm)
+
+theta <- tmResult$topics 
+dim(theta)              
+
+rowSums(theta)[1:10]  
+terms(lda_15, 10)
+topics(lda_15)
+x<-data.frame(topics(lda_15))
+
+x1 <- cbind(deathdat, x)
+x1 <- cbind(deathdat, theta)
+write.csv(x1, "F:/GSU/x1.csv", row.names = FALSE)
+
+
+top10terms_15 = as.matrix(terms(lda_15,10))
+top10terms_15
+lda.topics_15 = as.matrix(topics(lda_15))
+
+write.csv(lda.topics_15,file = paste('F:/GSU/LDAGibbs',15,'DocsToTopics.csv'))
+write.csv(x1,file = paste('F:/GSU/LDAGibbs',15,'DocsToTopics.csv'))
+summary(as.factor(lda.topics_15[,1]))
+x2 <- data.frame(rownames(lda.topics_15), lda.topics_15[,1])
+x2<- cbind(x2, x1)
+topicprob_15 = as.matrix(lda_15@gamma)
+
+write.csv(topicprob_15, file = paste('F:/GSU/LDAGibbs', 15, 'DoctToTopicProb.csv'))
+head(topicprob_15,1)
+topicprob_15[1:5,]
+
+```
+
+```{r wc}
+lda_15.topics <- topicmodels::topics(lda_15, 1)
+
+lda_15.terms <- as.data.frame(topicmodels::terms(lda_15, 60), stringsAsFactors = FALSE)
+lda_15.terms[1:5]
+
+df <- data.frame(term = lda_15@terms)
+colorVec = rep(c('red', 'skyblue'), length.out=nrow(df))
+plots <- list()  # new empty list
+for (i in 1:seqk[which.max(hm_many)]) {
+  topic <- i
+  df <- data.frame(term = lda_15@terms, p = exp(lda_15@beta[topic,]))
+  df <- df[order(df$p, decreasing = TRUE),]
+  df <- df[1:25,]
+  p1 = wordcloud2(data = data.frame(df$term, df$p), color= colorVec, ellipticity = .6,  size=2, minRotation = -pi/6, maxRotation = -pi/6)
+  plots[[i]] <- p1  # add each plot into plot list
+}
+multiplot(plotlist = plots, cols = 4)
+```
+
+```{r}
+ap_lda_td <- tidy(lda_15, matrix = "beta")
+top_n(ap_lda_td, 10)
+
+
+top_terms <- ap_lda_td %>%
+  group_by(topic) %>%
+  top_n(30, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+top_terms
+
+
+top_terms %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip()
+
+
+top_terms %>%
+ filter(topic==1|topic==8|topic==12|topic==17) %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_bar(alpha = 0.8, stat = "identity", show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free", ncol = 2) +
+  coord_flip()
+
+```
+
+```{r}
+top5termsPerTopic <- terms(lda_15, 5)
+topicNames <- apply(top5termsPerTopic, 2, paste, collapse=" ")
+x3 <- sample(1:437, 10)
+
+exampleIds <- c(x3)
+lapply(docs[exampleIds], as.character)
+
+library("reshape2")
+library("ggplot2")
+N <- length(exampleIds)
+attr(lda_15, "alpha") 
+
+tmResult <- posterior(lda_15)
+theta <- tmResult$topics
+beta <- tmResult$terms
+topicNames <- apply(terms(lda_15, 5), 2, paste, collapse = " ")  # reset topicnames
+
+# get topic proportions form example documents
+topicProportionExamples <- theta[exampleIds,]
+colnames(topicProportionExamples) <- topicNames
+vizDataFrame <- melt(cbind(data.frame(topicProportionExamples), document = factor(1:N)), variable.name = "topic", id.vars = "document")  
+
+ggplot(data = vizDataFrame, aes(topic, value, fill = document), ylab = "proportion") + 
+  geom_bar(stat="identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +  
+  coord_flip() +
+  facet_wrap(~ document, ncol = N)
+
+```
+
+```{r}
+topicNames <- apply(lda::top.topic.words(beta, 5, by.score = T), 2, paste, collapse = " ")
+
+countsOfPrimaryTopics <- rep(0, 20)
+names(countsOfPrimaryTopics) <- topicNames
+for (i in 1:nDocs(dtm)) {
+  topicsPerDoc <- theta[i, ] # select topic distribution for document i (this will be used in SOM)
+  primaryTopic <- order(topicsPerDoc, decreasing = TRUE)[1] 
+  countsOfPrimaryTopics[primaryTopic] <- countsOfPrimaryTopics[primaryTopic] + 1
+}
+sort(countsOfPrimaryTopics, decreasing = TRUE)
+
+# What are the most probable topics in the entire collection?
+topicProportions <- colSums(theta) / nDocs(dtm)  # mean probablities over all paragraphs
+names(topicProportions) <- topicNames     # assign the topic names we created before
+sort(topicProportions, decreasing = TRUE) # show summed proportions in decreased order
+
+
+# get mean topic proportions per decade
+topic_proportion_per_decade <- aggregate(theta, by = list(Year = deathdat$yearofdeath), mean)
+# set topic names to aggregated columns
+colnames(topic_proportion_per_decade)[2:(K+1)] <- topicNames
+
+# reshape data frame
+vizDataFrame <- melt(topic_proportion_per_decade, id.vars = "Year")
+
+# plot topic proportions per deacde as bar plot
+require(pals)
+ggplot(subset(vizDataFrame, Year < 2018), aes(x=Year, y=value, fill=variable)) + 
+  geom_bar(stat = "identity") + ylab("proportion") + 
+  scale_fill_manual(values = paste0(alphabet(20), "FF"), name = "Year of Death") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ggtitle("Average Topic Proportions by Year Mean" ~(theta))
+```
+
+```{r}
+# What are the most probable topics in the entire collection?
+topicProportions <- colSums(theta) / nDocs(dtm)  # mean probablities over all paragraphs
+names(topicProportions) <- topicNames     # assign the topic names we created before
+sort(topicProportions, decreasing = TRUE) # show summed proportions in decreased order
+
+#topicToFilter <- 6  # you can set this manually ...
+# ... or have it selected by a term in the topic name (e.g. 'children')
+topicToFilter <- grep('gun', topicNames)[1] 
+topicThreshold <- 0.2 
+selectedDocumentIndexes <- which(theta[, topicToFilter] >= topicThreshold)
+filteredCorpus <- docs[selectedDocumentIndexes]
+
+# show length of filtered corpus
+filteredCorpus
+# The filtered corpus contains 59 documents related to "gun" at least 20% of the time
+
+```
+
+```{r}
+topicTerms <- tidyr::gather(lda_15.terms, Topic)
+topicTerms <- cbind(topicTerms, Rank = rep(1:30))
+topTerms <- dplyr::filter(topicTerms, Rank < 4)
+topTerms <- dplyr::mutate(topTerms, Topic = stringr::word(Topic, 2))
+topTerms$Topic <- as.numeric(topTerms$Topic)
+topicLabel <- data.frame()
+for (i in 1:20){
+  z <- dplyr::filter(topTerms, Topic == i)
+  l <- as.data.frame(paste(z[1,2], z[2,2], z[3,2], sep = " " ), stringsAsFactors = FALSE)
+  topicLabel <- rbind(topicLabel, l)
+  
+}
+colnames(topicLabel) <- c("Label")
+topicLabel
+topicLabel$topic <- rep_len(1:20, length.out=20)
+
+theta <- as.data.frame(topicmodels::posterior(lda_15)$topics)
+head(theta[1:5])
+
+dev.off()
+
+topicProbabilities <- as.data.frame(lda_15@gamma)
+colnames(topicProbabilities) <- topicLabel$topic 
+d <- dist(t(topicProbabilities), method="correlation")   
+fit <- hclust(d=d, method="ward.D2") 
+plot.new()
+plot(fit, hang=-1)
+groups <- cutree(fit, k=5)     
+rect.hclust(fit, k=5, border="red")
+
+
+```
+
+```{r}
+theta <- as.data.frame(topicmodels::posterior(lda_15)$topics)
+head(theta[1:5])
+
+x <- as.data.frame(as.character(row.names(theta)), stringsAsFactors = FALSE)
+colnames(x) <- c("doc_id")
+
+theta2 <- cbind(x, theta)
+theta2 <- dplyr::left_join(theta2, deathdat, by = "doc_id")
+
+## Returns column means grouped by catergory
+theta.mean.by <- by(theta2[, 2:21], theta2$doc_id, colMeans)
+theta.mean <- do.call("rbind", theta.mean.by)
+
+library(corrplot)
+c <- cor(theta.mean)
+corrplot(c, method = "square")
+
+topics <- topicmodels::posterior(lda_15, dtm)[["topics"]]
+heatmap.2(topics, scale = "row")
+post <- topicmodels::posterior(lda_15)
+
+
+theta.mean.ratios <- theta.mean
+for (ii in 1:nrow(theta.mean)) {
+  for (jj in 1:ncol(theta.mean)) {
+    theta.mean.ratios[ii,jj] <-
+      theta.mean[ii,jj] / sum(theta.mean[ii,-jj])
+  }
+}
+topics.by.ratio <- apply(theta.mean.ratios, 1, function(x) sort(x, decreasing = TRUE, index.return = TRUE)$ix)
+topics.most.diagnostic <- topics.by.ratio[1,]
+head(topics.most.diagnostic)
+
+
+x5<-cbind(deathdat, as.matrix(topics(lda_15)))
+```
+
+```{r}
+library(LDAvis)
+library(servr)
+library(dplyr)
+library(stringi) 
+library(Rmpfr)
+
+topicmodels2LDAvis <- function(x, ...){
+  post <- topicmodels::posterior(x)
+  if (ncol(post[["topics"]]) < 3) stop("The model must contain > 2 topics")
+  mat <- x@wordassignments
+  LDAvis::createJSON(
+    phi = post[["terms"]], 
+    theta = post[["topics"]],
+    vocab = colnames(post[["terms"]]),
+    doc.length = slam::row_sums(mat, na.rm = TRUE),
+    term.frequency = slam::col_sums(mat, na.rm = TRUE)
+  )
+}
+
+serVis(topicmodels2LDAvis(lda_15))
+
+
+```
+
+
+```{r}
+############################################
+library(textmineR)
+set.seed(12345)
+
+
+dtm <- CreateDtm(doc_vec = deathdat$text, # character vector of documents
+                 doc_names = deathdat$doc_id , # document names
+                 ngram_window = c(1, 3), # minimum and maximum n-gram length
+                 stopword_vec = c(stopwords::stopwords("en"), # stopwords from tm
+                                  myStopWords=s_words), # this is the default value
+                 lower = TRUE, # lowercase - this is the default value
+                 remove_punctuation = TRUE, # punctuation - this is the default
+                 remove_numbers = TRUE, # numbers - this is the default
+                 verbose = FALSE, # Turn off status bar for this demo
+                 cpus = 2) # default is all available cpus on the system
+
+dtm <- dtm[,colSums(dtm) > 2]
+
+model <- FitLdaModel(dtm = dtm, 
+                     k = 20,
+                     iterations = 200, # I usually recommend at least 500 iterations or more
+                     burnin = 180,
+                     alpha = 0.1,
+                     beta = 0.05,
+                     optimize_alpha = TRUE,
+                     calc_likelihood = TRUE,
+                     calc_coherence = TRUE,
+                     calc_r2 = TRUE,
+                     cpus = 2) 
+str(model)
+model$r2
+plot(model$log_likelihood, type = "l")
+summary(model$coherence)
+hist(model$coherence, 
+     col= "blue", 
+     main = "Histogram of probabilistic coherence")
+model$top_terms <- GetTopTerms(phi = model$phi, M = 5)
+head(t(model$top_terms))
+model$prevalence <- colSums(model$theta) / sum(model$theta) * 100
+plot(model$prevalence, model$alpha, xlab = "prevalence", ylab = "alpha")
+model$labels <- LabelTopics(assignments = model$theta > 0.05, 
+                            dtm = dtm,
+                            M = 1)
+
+head(model$labels)
+model$summary <- data.frame(topic = rownames(model$phi),
+                            label = model$labels,
+                            coherence = round(model$coherence, 3),
+                            prevalence = round(model$prevalence,3),
+                            top_terms = apply(model$top_terms, 2, function(x){
+                              paste(x, collapse = ", ")
+                            }),
+                            stringsAsFactors = FALSE)
+model$summary[ order(model$summary$coherence, decreasing = TRUE) , ]
+
+```
+
+```{r}
+########################
+names(model)
+
+summary(model$coherence)
+
+model$assignments <- model$theta
+model$assignments[ model$assignments < 0.05 ] <- 0
+model$assignments <- model$assignments / rowSums(model$assignments)
+model$assignments[ is.na(model$assignments) ] <- 0
+
+# Get some topic labels using n-grams from the DTM
+model$labels <- LabelTopics(assignments = model$assignments, dtm = dtm, M = 2)
+
+model$doc_count <- colSums(model$assignments > 0)
+
+# Create a summary matrix to view topics
+model$topic_summary <- data.frame(topic = rownames(model$phi),
+top_terms = apply(model$top_terms, 2, 
+function(x) paste(x, collapse=", ")),labels = apply(model$labels, 1, function(x) paste(x, collapse=", ")),
+coherence = round(model$coherence, 3),prevalence = round(model$prevalence),
+doc_count = model$doc_count, 
+stringsAsFactors=FALSE)
+
+print(model$topic_summary)
+
+tf_mat <- TermDocFreq(dtm = dtm)
+head(tf_mat[ order(tf_mat$term_freq, decreasing = TRUE) , ], 10)
+
+tf_bigrams <- tf_mat[ stringr::str_detect(tf_mat$term, "_") , ]
+head(tf_bigrams[ order(tf_bigrams$term_freq, decreasing = TRUE) , ], 10)
+dtm <- dtm[ , colSums(dtm > 0) > 3 ] # alternatively: dtm[ , tf_mat$term_freq > 3 ]
+
+tf_mat <- tf_mat[ tf_mat$term %in% colnames(dtm) , ]
+
+tf_bigrams <- tf_bigrams[ tf_bigrams$term %in% colnames(dtm) , ]
+m1<-as.matrix(dtm)
+#write.csv(m1, file=paste("F:/Examples/ITMViz-master/ITMViz-master/data/jedit-5.1.0", "DocumentTermMatrix.csv", sep="/"))  
+```
+
